@@ -3,6 +3,7 @@ import * as containerinstance from '@pulumi/azure-native/containerinstance'
 import * as pulumi from "@pulumi/pulumi";
 import * as resources from '@pulumi/azure-native/resources'
 import * as containerregistry from '@pulumi/azure-native/containerregistry'
+import * as redis from "@pulumi/azure-native/redis";
 
 
 // Import the configuration settings for the current stack.
@@ -20,6 +21,34 @@ const memory = config.requireNumber('memory')
 
 // Create a resource group.
 const resourceGroup = new resources.ResourceGroup(`${prefixName}-rg`)
+
+// Create a managed Redis service
+const redisCache = new redis.Redis(`${prefixName}-redis`, {
+  name: `${prefixName}-weather-cache`,
+  location: 'westus3',
+  resourceGroupName: resourceGroup.name,
+  enableNonSslPort: true,
+  redisVersion: 'Latest',
+  minimumTlsVersion: '1.2',
+  redisConfiguration: {
+    maxmemoryPolicy: 'allkeys-lru'
+  },
+  sku: {
+    name: 'Basic',
+    family: 'C',
+    capacity: 0
+  }
+})
+
+// Extract the auth creds from the deployed Redis service
+const redisAccessKey = redis
+  .listRedisKeysOutput({
+    name: redisCache.name,
+    resourceGroupName: resourceGroup.name,
+  })
+  .apply((keys) => keys.primaryKey)
+
+const redisConnectionString = pulumi.interpolate`rediss://:${redisAccessKey}@${redisCache.hostName}:${redisCache.sslPort}`
 
 // Create the container registry.
 const registry = new containerregistry.Registry("registry", {
@@ -83,9 +112,19 @@ const containerGroup = new containerinstance.ContainerGroup(
         name: imageName,
         image: image.ref,
         ports: [{ port: containerPort, protocol: 'tcp' }],
-        environmentVariables: [
-          { name: 'PORT', value: containerPort.toString() },
-          { name: 'WEATHER_API_KEY', value: config.requireSecret('weatherApiKey') }, 
+       environmentVariables: [
+          {
+            name: 'PORT',
+            value: containerPort.toString(),
+          },
+          {
+            name: 'WEATHER_API_KEY',
+            value: config.requireSecret('weatherApiKey'),
+          },
+          {
+            name: 'REDIS_URL',
+            value: redisConnectionString,
+          },
         ],
         resources: {
           requests: { cpu: cpu, memoryInGB: memory },
